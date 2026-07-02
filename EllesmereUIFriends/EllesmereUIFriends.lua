@@ -51,6 +51,7 @@ local defaults = {
             showRegionIcons = true,
             autoAcceptFriendInvites = false,
             showOffline    = true,
+            friendSortMode = "status",
             visibility     = "always",
             visOnlyInstances = false,
             visHideHousing   = false,
@@ -548,6 +549,7 @@ end
 -- BNet friends keyed by [id], WoW friends keyed by [id + 10000].
 local _friendCache = {}
 local _FC_WOW_OFFSET = 10000
+local _sortingFriendsList = false
 
 local function GetCachedFriendInfo(button)
     if not button or not button.buttonType or not button.id then return nil, nil end
@@ -592,6 +594,168 @@ local function RefreshFriendCache()
         local info = C_FriendList.GetFriendInfoByIndex(i)
         if info then _friendCache[i + _FC_WOW_OFFSET] = info end
     end
+end
+
+local function GetFriendElementInfo(elementData)
+    if not elementData or not elementData.buttonType or not elementData.id then return nil end
+    if elementData.buttonType == FRIENDS_BUTTON_TYPE_BNET then
+        return _friendCache[elementData.id], nil
+    elseif elementData.buttonType == FRIENDS_BUTTON_TYPE_WOW then
+        return nil, _friendCache[elementData.id + _FC_WOW_OFFSET]
+    end
+end
+
+local function IsFriendElementOnline(elementData)
+    local bnetInfo, wowInfo = GetFriendElementInfo(elementData)
+    if bnetInfo then
+        return bnetInfo.gameAccountInfo and bnetInfo.gameAccountInfo.isOnline or false
+    elseif wowInfo then
+        return wowInfo.connected or false
+    end
+    return false
+end
+
+local function GetFriendElementName(elementData)
+    local bnetInfo, wowInfo = GetFriendElementInfo(elementData)
+    if bnetInfo then
+        local gi = bnetInfo.gameAccountInfo
+        return strlower(bnetInfo.accountName or bnetInfo.battleTag or (gi and gi.characterName) or "")
+    elseif wowInfo then
+        return strlower(wowInfo.name or "")
+    end
+    return ""
+end
+
+local function IsSafeTrue(value)
+    return (not issecretvalue or not issecretvalue(value)) and value or false
+end
+
+local function GetFriendElementStatusRank(elementData)
+    local bnetInfo, wowInfo = GetFriendElementInfo(elementData)
+    if bnetInfo then
+        if not (bnetInfo.gameAccountInfo and bnetInfo.gameAccountInfo.isOnline) then return 3 end
+        if IsSafeTrue(bnetInfo.isAFK) or (bnetInfo.gameAccountInfo and bnetInfo.gameAccountInfo.clientProgram == "BSAp") then return 1 end
+        if IsSafeTrue(bnetInfo.isDND) then return 2 end
+        return 0
+    elseif wowInfo then
+        if not wowInfo.connected then return 3 end
+        if IsSafeTrue(wowInfo.afk) then return 1 end
+        if IsSafeTrue(wowInfo.dnd) then return 2 end
+        return 0
+    end
+    return 3
+end
+
+local function GetFriendElementGameRank(elementData)
+    local bnetInfo, wowInfo = GetFriendElementInfo(elementData)
+    if wowInfo then return wowInfo.connected and 0 or 9 end
+    if not bnetInfo then return 9 end
+    local gi = bnetInfo.gameAccountInfo
+    if not (gi and gi.isOnline) then return 9 end
+    local cp = gi.clientProgram
+    if cp == BNET_CLIENT_WOW or cp == "WoW" then return 0 end
+    if cp == "App" or cp == "BSAp" then return 8 end
+    return 5
+end
+
+local function GetFriendElementLevelRank(elementData)
+    local bnetInfo, wowInfo = GetFriendElementInfo(elementData)
+    local level
+    if bnetInfo and bnetInfo.gameAccountInfo and bnetInfo.gameAccountInfo.isOnline then
+        level = bnetInfo.gameAccountInfo.characterLevel
+    elseif wowInfo and wowInfo.connected then
+        level = wowInfo.level
+    end
+    return level or -1
+end
+
+local function GetFriendElementZone(elementData)
+    local bnetInfo, wowInfo = GetFriendElementInfo(elementData)
+    if bnetInfo and bnetInfo.gameAccountInfo and bnetInfo.gameAccountInfo.isOnline then
+        return strlower(bnetInfo.gameAccountInfo.areaName or "")
+    elseif wowInfo and wowInfo.connected then
+        return strlower(wowInfo.area or "")
+    end
+    return ""
+end
+
+local function SortFriendElements(a, b)
+    local mode = EBS.db and EBS.db.profile and EBS.db.profile.friends and EBS.db.profile.friends.friendSortMode or "status"
+    local an, bn = GetFriendElementName(a), GetFriendElementName(b)
+
+    if mode == "name" then
+        if an ~= bn then return an < bn end
+    elseif mode == "game" then
+        local ag, bg = GetFriendElementGameRank(a), GetFriendElementGameRank(b)
+        if ag ~= bg then return ag < bg end
+    elseif mode == "level" then
+        local al, bl = GetFriendElementLevelRank(a), GetFriendElementLevelRank(b)
+        if al ~= bl then return al > bl end
+    elseif mode == "zone" then
+        local az, bz = GetFriendElementZone(a), GetFriendElementZone(b)
+        if az == "" then az = "\255" end
+        if bz == "" then bz = "\255" end
+        if az ~= bz then return az < bz end
+    else
+        local as, bs = GetFriendElementStatusRank(a), GetFriendElementStatusRank(b)
+        if as ~= bs then return as < bs end
+    end
+
+    if an ~= bn then return an < bn end
+    if a.buttonType ~= b.buttonType then return a.buttonType < b.buttonType end
+    return (a.id or 0) < (b.id or 0)
+end
+
+local function PostProcessFriendsDataProvider()
+    if _sortingFriendsList then return end
+    local fp = EBS.db and EBS.db.profile and EBS.db.profile.friends
+    local scrollBox = FriendsListFrame and FriendsListFrame.ScrollBox
+    local oldDP = scrollBox and scrollBox:GetDataProvider()
+    if not fp or not oldDP or not CreateDataProvider then return end
+
+    RefreshFriendCache()
+
+    local newDP = CreateDataProvider()
+    local group = {}
+    local pendingDivider = false
+
+    local function InsertElement(elementData)
+        if elementData.buttonType == FRIENDS_BUTTON_TYPE_DIVIDER then
+            pendingDivider = newDP:GetSize() > 0
+            return
+        end
+        if pendingDivider then
+            newDP:Insert({ buttonType = FRIENDS_BUTTON_TYPE_DIVIDER })
+            pendingDivider = false
+        end
+        newDP:Insert(elementData)
+    end
+
+    local function FlushGroup()
+        if #group == 0 then return end
+        table.sort(group, SortFriendElements)
+        for _, elementData in ipairs(group) do
+            InsertElement(elementData)
+        end
+        wipe(group)
+    end
+
+    for _, elementData in oldDP:Enumerate() do
+        local buttonType = elementData.buttonType
+        if buttonType == FRIENDS_BUTTON_TYPE_BNET or buttonType == FRIENDS_BUTTON_TYPE_WOW then
+            if fp.showOffline ~= false or IsFriendElementOnline(elementData) then
+                group[#group + 1] = elementData
+            end
+        else
+            FlushGroup()
+            InsertElement(elementData)
+        end
+    end
+    FlushGroup()
+
+    _sortingFriendsList = true
+    scrollBox:SetDataProvider(newDP, ScrollBoxConstants and ScrollBoxConstants.RetainScrollPosition or true)
+    _sortingFriendsList = false
 end
 
 local function GetFriendClassFile(bnetInfo, wowInfo)
@@ -1096,6 +1260,15 @@ local function ProcessFriendButtons()
             PostUpdateFriendButton(button)
         end
     end
+end
+
+local function RefreshFriendsListSettings()
+    if FriendsList_Update then
+        FriendsList_Update(true)
+    else
+        PostProcessFriendsDataProvider()
+    end
+    ProcessFriendButtons()
 end
 
 
@@ -2572,6 +2745,11 @@ local function SkinFriendsFrame()
             fd.stampType = nil
         end)
     end
+    if FriendsList_Update then
+        hooksecurefunc("FriendsList_Update", function()
+            PostProcessFriendsDataProvider()
+        end)
+    end
 
     -- Scroll position poller: detects scroll changes (drag, keyboard, etc.)
     -- without touching Blizzard's ScrollBar/ScrollBox at all. Just reads
@@ -3226,6 +3404,7 @@ function EBS:OnInitialize()
     _G._EFR_DB                   = EBS.db
     _G._EFR_ApplyFriends         = ApplyFriends
     _G._EFR_ProcessFriendButtons = ProcessFriendButtons
+    _G._EFR_RefreshFriendsList   = RefreshFriendsListSettings
 
     -- Register visibility updater + mouseover target
     if EllesmereUI.RegisterVisibilityUpdater then

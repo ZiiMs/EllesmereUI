@@ -196,6 +196,14 @@ initFrame:SetScript("OnEvent", function(self)
         "blizzard", "modern", "pixel", "glyph",
         "arcade", "legend", "midnight", "runic",
     }
+    local FRIEND_SORT_VALUES = {
+        status = "Status",
+        name   = "Name",
+        game   = "Game",
+        level  = "Level",
+        zone   = "Zone",
+    }
+    local FRIEND_SORT_ORDER = { "status", "name", "game", "level", "zone" }
 
     local function BuildFriendsPage(pageName, parent, yOffset)
         local W = EllesmereUI.Widgets
@@ -207,6 +215,30 @@ initFrame:SetScript("OnEvent", function(self)
 
         -- DISPLAY
         _, h = W:SectionHeader(parent, "DISPLAY", y);  y = y - h
+
+        -- Show Offline Friends | Sort Friends By
+        _, h = W:DualRow(parent, y,
+            { type="toggle", text="Show Offline Friends",
+              getValue=function()
+                local f = FriendsDB(); return not f or f.showOffline ~= false
+              end,
+              setValue=function(v)
+                local f = FriendsDB(); if not f then return end
+                f.showOffline = v
+                if _G._EFR_RefreshFriendsList then _G._EFR_RefreshFriendsList() end
+              end },
+            { type="dropdown", text="Sort Friends By",
+              values = FRIEND_SORT_VALUES,
+              order  = FRIEND_SORT_ORDER,
+              getValue=function()
+                local f = FriendsDB(); return f and f.friendSortMode or "status"
+              end,
+              setValue=function(v)
+                local f = FriendsDB(); if not f then return end
+                f.friendSortMode = v
+                if _G._EFR_RefreshFriendsList then _G._EFR_RefreshFriendsList() end
+              end }
+        );  y = y - h
 
         -- Class Icon Theme | Class Color Names
         _, h = W:DualRow(parent, y,
@@ -349,7 +381,8 @@ initFrame:SetScript("OnEvent", function(self)
             end
             EllesmereUI:InvalidatePageCache()
             if _G._EFR_ApplyFriends then _G._EFR_ApplyFriends() end
-            if _G._EFR_ProcessFriendButtons then _G._EFR_ProcessFriendButtons() end
+            if _G._EFR_RefreshFriendsList then _G._EFR_RefreshFriendsList()
+            elseif _G._EFR_ProcessFriendButtons then _G._EFR_ProcessFriendButtons() end
         end,
     })
 
